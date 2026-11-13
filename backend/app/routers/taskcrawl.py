@@ -1,4 +1,8 @@
-"""采集任务接口：维护采集任务，覆盖提交调度、启动任务、终止任务等动作。"""
+"""采集任务接口：维护采集任务，覆盖提交调度、启动任务、终止任务等动作。
+
+列表与详情返回同一份准入结论（采集源已上线、规则已启用、调度配置完整），提交调度和启动任务
+时服务层按这份结论重新校验，不满足就不落库。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -16,6 +20,11 @@ LIST_FIELDS = ["任务编号", "采集源名称", "规则编号", "调度周期"
 STATUSES = ["草稿", "待调度", "执行中", "已完成", "已终止"]
 
 
+def _with_admission(row: dict[str, Any]) -> dict[str, Any]:
+    """给任务记录附上准入结论，列表与详情复用同一份字段，前端不再各自推导。"""
+    return {**row, "admission": service.evaluate(row)}
+
+
 @router.get("", response_model=PageResult[dict])
 def list_entries(
     keyword: str | None = Query(default=None, description="按任务编号检索"),
@@ -23,20 +32,20 @@ def list_entries(
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按任务编号与状态过滤采集任务列表；没有数据时返回空页，不报错。"""
+    """按任务编号与状态过滤采集任务列表；每条记录都带回准入结论。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
     items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
-    return PageResult(items=items, total=total, page=page, size=size)
+    return PageResult(items=[_with_admission(row) for row in items], total=total, page=page, size=size)
 
 
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
-    """读取单条采集任务明细；不存在时给出可读的错误说明。"""
+    """读取单条采集任务明细，包含采集源、解析规则与调度配置的准入结论。"""
     entry = service.get_entry(entry_id)
     if entry is None:
-        raise HTTPException(status_code=404, detail=f"采集任务 {entry_id} 不存在或已归档")
-    return entry
+        raise HTTPException(status_code=404, detail=f"采集任务 {entry_id} 不存在")
+    return _with_admission(entry)
 
 
 @router.post("", response_model=ActionResult)
@@ -45,21 +54,26 @@ def create_entry(payload: EntryPayload) -> ActionResult:
     entry, missing = service.create_entry(payload.values)
     if missing:
         return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
-    return ActionResult(ok=True, message="采集任务已登记", entry=entry)
+    return ActionResult(ok=True, message="采集任务已登记，当前状态为「草稿」", entry=_with_admission(entry))
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条采集任务执行提交调度、启动任务、终止任务；不允许的动作会被拦下并说明原因。"""
+    """对单条采集任务执行提交调度、启动任务、终止任务；准入不通过时状态保持原样。"""
     action = str(payload.values.get("action") or "").strip()
     entry, message = service.run_action(entry_id, action)
     if entry is None:
-        return ActionResult(ok=False, message=message)
-    return ActionResult(ok=True, message=message, entry=entry)
+        current = service.get_entry(entry_id)
+        return ActionResult(
+            ok=False,
+            message=message,
+            entry=_with_admission(current) if current is not None else None,
+        )
+    return ActionResult(ok=True, message=message, entry=_with_admission(entry))
 
 
 @router.get("/export")
 def export_entries() -> dict[str, Any]:
     """导出采集任务清单：返回当前过滤条件下的全量数据。"""
     items, total = service.list_entries(page=1, size=10000)
-    return {"module": "taskcrawl", "total": total, "items": items}
+    return {"module": "taskcrawl", "total": total, "items": [_with_admission(row) for row in items]}

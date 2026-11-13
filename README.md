@@ -74,6 +74,21 @@ npm run dev
   `backend/app/routers/<模块>.py`，业务规则在 `backend/app/services/<模块>.py`。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+- 采集源、解析规则的状态只能按序推进一格，跳级、倒序和终态复活都会被拒绝并返回原因。
+  判定逻辑在 `app/services/transitions.py`。
+- 采集任务提交调度、启动任务前统一走 `app/services/admission.py`：采集源必须是「已上线」、
+  解析规则必须是「已启用」、任务自身的调度周期/增量字段/批次大小/起止水位必须完整，
+  三项同时满足才允许推进；列表、详情与动作接口返回同一份 `admission` 结论和生效配置。
+- 动作校验与落库在同一把锁内完成（`app/services/locks.py`），并发提交同一条记录只有一次生效，
+  失败请求不会留下半套状态。
+
+## 测试
+
+```bash
+cd backend && .venv/bin/pip install pytest httpx && .venv/bin/python -m pytest tests -q
+```
+
+回归用例覆盖采集源/解析规则的状态机、任务准入、配置贯通和并发提交。
 
 领域：数据工程
 子方向：数据采集、爬虫与RPA

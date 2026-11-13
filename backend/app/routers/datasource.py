@@ -1,4 +1,8 @@
-"""采集源登记接口：维护采集源，覆盖发起连通测试、标记上线、归档源配置等动作。"""
+"""采集源登记接口：维护采集源，覆盖发起连通测试、标记上线、归档源配置等动作。
+
+写接口只在服务层状态真正落库后返回 ok=True；校验失败时返回 ok=False 与可读原因，并带回
+记录当前状态，前端据此刷新列表而不是用本地乐观结果覆盖。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -35,7 +39,7 @@ def get_entry(entry_id: int) -> dict:
     """读取单条采集源明细；不存在时给出可读的错误说明。"""
     entry = service.get_entry(entry_id)
     if entry is None:
-        raise HTTPException(status_code=404, detail=f"采集源 {entry_id} 不存在或已归档")
+        raise HTTPException(status_code=404, detail=f"采集源 {entry_id} 不存在")
     return entry
 
 
@@ -45,16 +49,21 @@ def create_entry(payload: EntryPayload) -> ActionResult:
     entry, missing = service.create_entry(payload.values)
     if missing:
         return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
-    return ActionResult(ok=True, message="采集源已登记", entry=entry)
+    return ActionResult(ok=True, message="采集源已登记，当前状态为「草稿」", entry=entry)
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条采集源执行发起连通测试、标记上线、归档源配置；不允许的动作会被拦下并说明原因。"""
+    """对单条采集源执行发起连通测试、标记上线、归档源配置；跳级、倒序、归档后重开都会被拦下。"""
     action = str(payload.values.get("action") or "").strip()
     entry, message = service.run_action(entry_id, action)
     if entry is None:
-        return ActionResult(ok=False, message=message)
+        current = service.get_entry(entry_id)
+        return ActionResult(
+            ok=False,
+            message=message,
+            entry=dict(current) if current is not None else None,
+        )
     return ActionResult(ok=True, message=message, entry=entry)
 
 

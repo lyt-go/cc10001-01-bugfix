@@ -1,4 +1,8 @@
-"""解析规则接口：维护解析规则，覆盖提交规则验证、启用规则、废弃规则等动作。"""
+"""解析规则接口：维护解析规则，覆盖提交规则验证、启用规则、废弃规则等动作。
+
+启用规则只能从「规则验证中」进入，并确认属性提取器、列表容错、空值占位符、输出字段映射
+都已登记，避免未完成验证的规则被采集任务引用。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -35,7 +39,7 @@ def get_entry(entry_id: int) -> dict:
     """读取单条解析规则明细；不存在时给出可读的错误说明。"""
     entry = service.get_entry(entry_id)
     if entry is None:
-        raise HTTPException(status_code=404, detail=f"解析规则 {entry_id} 不存在或已归档")
+        raise HTTPException(status_code=404, detail=f"解析规则 {entry_id} 不存在")
     return entry
 
 
@@ -45,16 +49,21 @@ def create_entry(payload: EntryPayload) -> ActionResult:
     entry, missing = service.create_entry(payload.values)
     if missing:
         return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
-    return ActionResult(ok=True, message="解析规则已登记", entry=entry)
+    return ActionResult(ok=True, message="解析规则已登记，当前状态为「草稿」", entry=entry)
 
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条解析规则执行提交规则验证、启用规则、废弃规则；不允许的动作会被拦下并说明原因。"""
+    """对单条解析规则执行提交规则验证、启用规则、废弃规则；验证未完成时不允许启用。"""
     action = str(payload.values.get("action") or "").strip()
     entry, message = service.run_action(entry_id, action)
     if entry is None:
-        return ActionResult(ok=False, message=message)
+        current = service.get_entry(entry_id)
+        return ActionResult(
+            ok=False,
+            message=message,
+            entry=dict(current) if current is not None else None,
+        )
     return ActionResult(ok=True, message=message, entry=entry)
 
 

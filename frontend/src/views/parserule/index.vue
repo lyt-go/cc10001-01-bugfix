@@ -38,8 +38,10 @@
         <tr v-for="row in rows" :key="String(row.id)">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
           <td class="row-actions">
+            <span v-if="!row.status" class="muted-text">状态缺失</span>
+            <span v-else-if="!allowedActions(row).length" class="muted-text">已废弃，不可再流转</span>
             <button
-              v-for="action in actions"
+              v-for="action in allowedActions(row)"
               :key="action"
               class="link"
               type="button"
@@ -71,9 +73,27 @@ type Row = Record<string, string | number | null>
 
 const ENDPOINT = '/api/parserule'
 const columns = ["规则编号", "页面选择器", "内容选择器", "属性提取器", "列表容错", "空值占位符", "字符清洗正则", "输出字段映射"]
-const actions = ["提交规则验证", "启用规则", "废弃规则"]
-const statuses = ["草稿", "规则验证中", "已启用", "已废弃"]
+// 状态序列与服务层一致：启用规则只能从「规则验证中」进入，草稿不会出现启用按钮。
+const STATUS_ORDER = ['草稿', '规则验证中', '已启用', '已废弃']
+const ACTIONS = ['提交规则验证', '启用规则', '废弃规则']
 const stats = [{"label": "解析规则总数", "value": 0}, {"label": "已启用规则", "value": 0}, {"label": "验证中规则", "value": 0}]
+
+function actionTarget(action: string): string | null {
+  if (action === '提交规则验证') return '规则验证中'
+  if (action === '启用规则') return '已启用'
+  if (action === '废弃规则') return '已废弃'
+  return null
+}
+
+/** 当前状态可执行的动作：只允许推进到严格后继；已废弃为终态，不展示任何动作。 */
+function allowedActions(row: Row): string[] {
+  const current = STATUS_ORDER.indexOf(String(row.status ?? ''))
+  if (current < 0) return []
+  return ACTIONS.filter((action) => {
+    const target = actionTarget(action)
+    return target !== null && STATUS_ORDER.indexOf(target) === current + 1
+  })
+}
 
 const rows = ref<Row[]>([])
 const total = ref(0)
@@ -101,8 +121,11 @@ async function runAction(action: string, row: Row) {
       method: 'POST',
       body: JSON.stringify({ action }),
     })
-    if (!response.ok) {
-      throw new Error('解析规则动作未生效，请稍后重试')
+    const payload = await response.json().catch(() => null)
+    if (!response.ok || !payload?.ok) {
+      errorMessage.value = payload?.message ?? '解析规则动作未生效，请稍后重试'
+      await reload()
+      return
     }
     await reload()
   } catch (error) {
